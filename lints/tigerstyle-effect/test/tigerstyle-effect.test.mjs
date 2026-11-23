@@ -255,6 +255,64 @@ export function boundedExamples(maxItems: number, externalPolicy: unknown) {
 }
 `;
 
+const VALID_SPREAD_AND_SHADOWED_POLICIES = `
+declare const Effect: any;
+declare const Schedule: any;
+declare const task: any;
+declare const retryOpts: Record<string, unknown>;
+declare const baseOpts: Record<string, unknown>;
+
+export const schedule = Schedule.exponential("100 millis");
+
+export function spreadAndShadowed(opts: { schedule: unknown }) {
+  function withParam(schedule: unknown) {
+    return Effect.retry(task, schedule);
+  }
+  function withDestructure() {
+    const { schedule } = opts;
+    return Effect.retry(task, schedule);
+  }
+  function withUninit() {
+    let schedule: unknown;
+    if (opts.schedule) {
+      schedule = opts.schedule;
+    }
+    return Effect.retry(task, schedule);
+  }
+  function withCatch() {
+    try {
+      return Effect.succeed(1);
+    } catch (schedule) {
+      return Effect.retry(task, schedule);
+    }
+  }
+  return [
+    Effect.retry(task, { ...retryOpts }),
+    Effect.retry(task, { ...baseOpts, schedule: Schedule.exponential("100 millis") }),
+    withParam,
+    withDestructure,
+    withUninit,
+    withCatch,
+  ];
+}
+`;
+
+const INVALID_UNSHADOWED_AFTER_SHADOW = `
+declare const Effect: any;
+declare const Schedule: any;
+declare const task: any;
+
+const schedule = Schedule.exponential("100 millis");
+
+export function shadowed(schedule: unknown) {
+  return Effect.retry(task, schedule);
+}
+
+export function unshadowed() {
+  return Effect.retry(task, schedule);
+}
+`;
+
 describe("tigerstyle-effect/no-unbounded-loop", () => {
   it("flags while(true), do-while(true), for(;;), and Effect.forever", () => {
     assertHasRule(INVALID_UNBOUNDED_LOOPS, "tigerstyle-effect(no-unbounded-loop)", 5);
@@ -267,12 +325,14 @@ describe("tigerstyle-effect/no-unbounded-loop", () => {
   it("allows bounded loops and bounded repeat/retry policies", () => {
     assertNoErrors(VALID_BOUNDED_LOOPS);
   });
+
+  it("allows spread retry options and lexically shadowed schedule bindings", () => {
+    assertNoErrors(VALID_SPREAD_AND_SHADOWED_POLICIES);
+    assertHasRule(INVALID_UNSHADOWED_AFTER_SHADOW, "tigerstyle-effect(no-unbounded-loop)", 1);
+  });
 });
 
-describe("tigerstyle-effect/no-direct-recursion", () => {
-  it("flags recursive declarations, arrows, Effect.fn, and class methods", () => {
-    assertHasRule(
-      `
+const INVALID_DIRECT_RECURSION = `
 declare const Effect: any;
 
 export function factorial(n: number): number {
@@ -310,14 +370,9 @@ export class Walker {
     return n <= 0 ? 0 : Walker.scan(n - 1);
   }
 }
-`,
-      "tigerstyle-effect(no-direct-recursion)",
-      7,
-    );
-  });
+`;
 
-  it("allows shadowed names and calls to other objects with the same method name", () => {
-    assertNoErrors(`
+const VALID_SHADOWED_RECURSION = `
 export function run(run: () => number): number {
   return run();
 }
@@ -327,12 +382,52 @@ export function compute(): number {
   return compute();
 }
 
+export function nestedDecl(): number {
+  function nestedDecl(): number {
+    return 1;
+  }
+  return nestedDecl();
+}
+
+export function hoistedDecl(): number {
+  const value = hoistedDecl();
+  function hoistedDecl(): number {
+    return 2;
+  }
+  return value;
+}
+
+export function catchShadow(risky: () => number): number {
+  try {
+    return risky();
+  } catch (catchShadow) {
+    return (catchShadow as () => number)();
+  }
+}
+
 export class ProxyRunner {
   execute(delegate: { execute: () => number }): number {
     return delegate.execute();
   }
+
+  static scan(ProxyRunner: { scan: () => number }): number {
+    return ProxyRunner.scan();
+  }
+
+  static inspect(): number {
+    const ProxyRunner = { inspect: () => 1 };
+    return ProxyRunner.inspect();
+  }
 }
-`);
+`;
+
+describe("tigerstyle-effect/no-direct-recursion", () => {
+  it("flags recursive declarations, arrows, Effect.fn, and class methods", () => {
+    assertHasRule(INVALID_DIRECT_RECURSION, "tigerstyle-effect(no-direct-recursion)", 7);
+  });
+
+  it("allows shadowed names and calls to other objects with the same method name", () => {
+    assertNoErrors(VALID_SHADOWED_RECURSION);
   });
 });
 
@@ -568,7 +663,12 @@ export const batchSize = 50;
 export const pageSize = 25;
 export const hasTimeout = true;
 export const timeout = Duration.seconds(5);
+export const zeroTimeout = Duration.zero;
+export const ttl = Duration.infinity;
 export const delay = (delayMs: number) => delayMs * 2;
+export function wait(timeout = Duration.zero) {
+  return timeout;
+}
 
 export interface GoodConfig {
   timeout: Duration.Duration;

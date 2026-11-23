@@ -438,14 +438,55 @@ function applyPipeCombine(results, stepCount) {
   results.push(state);
 }
 
-function evaluateExprFrame(exprNode, constInitializers, visitedIds, stack, results) {
+function lookupScopeBinding(name, scopeStack) {
+  for (let i = scopeStack.length - 1; i >= 0; i -= 1) {
+    if (scopeStack[i].has(name)) {
+      return scopeStack[i].get(name);
+    }
+  }
+  return null;
+}
+
+function markPatternAmbiguous(pattern, scope) {
+  if (!pattern) {
+    return;
+  }
+  const names = new Set();
+  collectPatternIdentifiers(pattern, names);
+  for (const name of names) {
+    scope.set(name, AMBIGUOUS_BINDING);
+  }
+}
+
+function markAssignedAmbiguous(pattern, scopeStack) {
+  if (!pattern) {
+    return;
+  }
+  const names = new Set();
+  collectPatternIdentifiers(pattern, names);
+  for (const name of names) {
+    let updated = false;
+    for (let i = scopeStack.length - 1; i >= 0; i -= 1) {
+      if (scopeStack[i].has(name)) {
+        scopeStack[i].set(name, AMBIGUOUS_BINDING);
+        updated = true;
+        break;
+      }
+    }
+    if (!updated) {
+      scopeStack[0].set(name, AMBIGUOUS_BINDING);
+    }
+  }
+}
+
+function evaluateExprFrame(exprNode, scopeStack, visitedIds, stack, results) {
   const expr = unwrapExpression(exprNode);
   if (!expr) {
     pushEvalResult(results, "unbounded");
     return;
   }
   if (expr.type === "Identifier") {
-    const init = constInitializers.get(expr.name);
+    const init = lookupScopeBinding(expr.name, scopeStack);
     if (!init || init === AMBIGUOUS_BINDING || visitedIds.has(expr.name)) {
       pushEvalResult(results, "unknown");
       return;
@@ -461,6 +502,10 @@ function evaluateExprFrame(exprNode, constInitializers, visitedIds, stack, resul
       getObjectProperty(expr, "until");
     if (hasDirectBound) {
       pushEvalResult(results, "bounded");
+      return;
+    }
+    if (expr.properties.some((prop) => prop.type === "SpreadElement")) {
+      pushEvalResult(results, "unknown");
       return;
     }
     const scheduleProp = getObjectProperty(expr, "schedule");
@@ -489,7 +534,7 @@ function evaluateExprFrame(exprNode, constInitializers, visitedIds, stack, resul
   pushEvalResult(results, "unknown");
 }
 
-function evaluatePolicyBoundedness(rootExpr, constInitializers) {
+function evaluatePolicyBoundedness(rootExpr, scopeStack) {
   const stack = [{ kind: "expr", node: rootExpr }];
   const results = [];
   const visitedIds = new Set();
@@ -497,7 +542,7 @@ function evaluatePolicyBoundedness(rootExpr, constInitializers) {
   for (let steps = 0; steps < MAX_AST_NODES && stack.length > 0; steps += 1) {
     const frame = stack.pop();
     if (frame.kind === "expr") {
-      evaluateExprFrame(frame.node, constInitializers, visitedIds, stack, results);
+      evaluateExprFrame(frame.node, scopeStack, visitedIds, stack, results);
     } else if (frame.kind === "pipe-step") {
       enqueuePipeStepEval(stack, results, frame.node);
     } else if (frame.kind === "wrap-step") {
@@ -534,7 +579,7 @@ function getPolicyArgument(method, args) {
   return null;
 }
 
-function reportUnboundedRepeatOrRetry(node, method, constInitializers, context) {
+function reportUnboundedRepeatOrRetry(node, method, scopeStack, context) {
   const policyArg = getPolicyArgument(method, node.arguments);
   if (!policyArg) {
     return;
@@ -546,7 +591,7 @@ function reportUnboundedRepeatOrRetry(node, method, constInitializers, context) 
     });
     return;
   }
-  const boundedness = evaluatePolicyBoundedness(policyArg.node, constInitializers);
+  const boundedness = evaluatePolicyBoundedness(policyArg.node, scopeStack);
   if (boundedness === "unbounded") {
     context.report({
       node,
@@ -571,6 +616,65 @@ function checkPipeForever(node, context) {
   }
 }
 
+function pushFunctionPolicyScope(node, scopeStack, recordNameInOuter) {
+  const outerScope = scopeStack[scopeStack.length - 1];
+  if (recordNameInOuter && node.id && node.id.type === "Identifier") {
+    outerScope.set(node.id.name, AMBIGUOUS_BINDING);
+  }
+  const fnScope = new Map();
+  if (!recordNameInOuter && node.id && node.id.type === "Identifier") {
+    fnScope.set(node.id.name, AMBIGUOUS_BINDING);
+  }
+  for (const param of node.params) {
+    markPatternAmbiguous(param, fnScope);
+  }
+  scopeStack.push(fnScope);
+}
+
+function recordPolicyDeclarator(node, scopeStack) {
+  const scope = scopeStack[scopeStack.length - 1];
+  if (node.id.type === "Identifier" && node.init) {
+    scope.set(node.id.name, scope.has(node.id.name) ? AMBIGUOUS_BINDING : node.init);
+    return;
+  }
+  markPatternAmbiguous(node.id, scope);
+}
+
+function pushCatchPolicyScope(node, scopeStack) {
+  const catchScope = new Map();
+  markPatternAmbiguous(node.param, catchScope);
+  scopeStack.push(catchScope);
+}
+
+function pushClassPolicyScope(node, scopeStack, isExpression) {
+  const className = node.id && node.id.type === "Identifier" ? node.id.name : null;
+  if (!isExpression) {
+    if (className) {
+      scopeStack[scopeStack.length - 1].set(className, AMBIGUOUS_BINDING);
+    }
+    return;
+  }
+  const classScope = new Map();
+  if (className) {
+    classScope.set(className, AMBIGUOUS_BINDING);
+  }
+  scopeStack.push(classScope);
+}
+
+function handlePolicyCallExpression(node, scopeStack, context) {
+  checkPipeForever(node, context);
+  const method = getEffectMethodName(node.callee);
+  if (method === "forever") {
+    context.report({
+      node,
+      message:
+        "TigerStyle: Effect.forever creates an unbounded loop. Use Effect.repeat with an explicit bound such as { times }, { while }, { until }, or Schedule.recurs.",
+    });
+    return;
+  }
+  reportUnboundedRepeatOrRetry(node, method, scopeStack, context);
+}
+
 const noUnboundedLoopRule = {
   meta: {
     type: "problem",
@@ -581,7 +685,9 @@ const noUnboundedLoopRule = {
     schema: [],
   },
   create(context) {
-    const constInitializers = new Map();
+    const scopeStack = [new Map()];
+    const pushScope = () => scopeStack.push(new Map());
+    const popScope = () => scopeStack.pop();
 
     function checkConstantLoopTest(node) {
       if (getConstantBooleanValue(node.test) === true) {
@@ -594,23 +700,31 @@ const noUnboundedLoopRule = {
     }
 
     return {
-      VariableDeclarator(node) {
-        if (node.id.type !== "Identifier" || !node.init) {
-          return;
-        }
-        constInitializers.set(
-          node.id.name,
-          constInitializers.has(node.id.name) ? AMBIGUOUS_BINDING : node.init,
-        );
-      },
-      AssignmentExpression(node) {
-        if (node.left.type === "Identifier") {
-          constInitializers.set(node.left.name, AMBIGUOUS_BINDING);
-        }
-      },
+      BlockStatement: pushScope,
+      "BlockStatement:exit": popScope,
+      SwitchStatement: pushScope,
+      "SwitchStatement:exit": popScope,
+      ForInStatement: pushScope,
+      "ForInStatement:exit": popScope,
+      ForOfStatement: pushScope,
+      "ForOfStatement:exit": popScope,
+      CatchClause: (node) => pushCatchPolicyScope(node, scopeStack),
+      "CatchClause:exit": popScope,
+      FunctionDeclaration: (node) => pushFunctionPolicyScope(node, scopeStack, true),
+      "FunctionDeclaration:exit": popScope,
+      FunctionExpression: (node) => pushFunctionPolicyScope(node, scopeStack, false),
+      "FunctionExpression:exit": popScope,
+      ArrowFunctionExpression: (node) => pushFunctionPolicyScope(node, scopeStack, false),
+      "ArrowFunctionExpression:exit": popScope,
+      ClassDeclaration: (node) => pushClassPolicyScope(node, scopeStack, false),
+      ClassExpression: (node) => pushClassPolicyScope(node, scopeStack, true),
+      "ClassExpression:exit": popScope,
+      VariableDeclarator: (node) => recordPolicyDeclarator(node, scopeStack),
+      AssignmentExpression: (node) => markAssignedAmbiguous(node.left, scopeStack),
       WhileStatement: checkConstantLoopTest,
       DoWhileStatement: checkConstantLoopTest,
       ForStatement(node) {
+        pushScope();
         if (!node.test || getConstantBooleanValue(node.test) === true) {
           context.report({
             node,
@@ -619,19 +733,8 @@ const noUnboundedLoopRule = {
           });
         }
       },
-      CallExpression(node) {
-        checkPipeForever(node, context);
-        const method = getEffectMethodName(node.callee);
-        if (method === "forever") {
-          context.report({
-            node,
-            message:
-              "TigerStyle: Effect.forever creates an unbounded loop. Use Effect.repeat with an explicit bound such as { times }, { while }, { until }, or Schedule.recurs.",
-          });
-          return;
-        }
-        reportUnboundedRepeatOrRetry(node, method, constInitializers, context);
-      },
+      "ForStatement:exit": popScope,
+      CallExpression: (node) => handlePolicyCallExpression(node, scopeStack, context),
     };
   },
 };
@@ -693,17 +796,20 @@ function getBoundFunctionFromInit(initNode) {
   return getEffectFnWrappedFunction(expr);
 }
 
+function isNameShadowedInFrame(name, frame, endBlock, blockStack) {
+  for (let b = endBlock - 1; b >= frame.blockIndex; b -= 1) {
+    if (blockStack[b].has(name)) {
+      return true;
+    }
+  }
+  return frame.paramNames.has(name);
+}
+
 function isDirectIdentifierRecursion(calleeName, fnStack, blockStack) {
   for (let i = fnStack.length - 1; i >= 0; i -= 1) {
     const frame = fnStack[i];
-    const startBlock = frame.blockIndex;
     const endBlock = i === fnStack.length - 1 ? blockStack.length : fnStack[i + 1].blockIndex;
-    for (let b = endBlock - 1; b >= startBlock; b -= 1) {
-      if (blockStack[b].has(calleeName)) {
-        return false;
-      }
-    }
-    if (frame.paramNames.has(calleeName)) {
+    if (isNameShadowedInFrame(calleeName, frame, endBlock, blockStack)) {
       return false;
     }
     if (frame.selfNames.has(calleeName)) {
@@ -722,9 +828,13 @@ function findThisMethodFrame(fnStack) {
   return null;
 }
 
-function findStaticMethodMatch(className, propName, fnStack) {
+function findStaticMethodMatch(className, propName, fnStack, blockStack) {
   for (let i = fnStack.length - 1; i >= 0; i -= 1) {
     const frame = fnStack[i];
+    const endBlock = i === fnStack.length - 1 ? blockStack.length : fnStack[i + 1].blockIndex;
+    if (isNameShadowedInFrame(className, frame, endBlock, blockStack) || frame.selfNames.has(className)) {
+      return false;
+    }
     if (frame.isStatic && frame.className === className && frame.methodName === propName) {
       return true;
     }
@@ -800,7 +910,7 @@ function checkRecursiveCall(node, state, context) {
   }
   if (
     node.callee.object.type === "Identifier" &&
-    findStaticMethodMatch(node.callee.object.name, propName, state.fnStack)
+    findStaticMethodMatch(node.callee.object.name, propName, state.fnStack, state.blockStack)
   ) {
     context.report({
       node,
@@ -821,6 +931,63 @@ function recordMethodDefinition(node, state) {
   state.methodMeta.set(node.value, { methodName, className, isStatic: Boolean(node.static) });
 }
 
+function enterRecursionBlock(node, state) {
+  const blockNames = new Set();
+  for (const stmt of node.body) {
+    if (stmt.type === "FunctionDeclaration" && stmt.id && stmt.id.type === "Identifier") {
+      blockNames.add(stmt.id.name);
+    }
+  }
+  state.blockStack.push(blockNames);
+}
+
+function enterRecursionClass(node, state, isExpression) {
+  const className = node.id && node.id.type === "Identifier" ? node.id.name : null;
+  if (!isExpression && className) {
+    state.blockStack[state.blockStack.length - 1].add(className);
+  }
+  state.classStack.push(className);
+  if (isExpression) {
+    const classScope = new Set();
+    if (className) {
+      classScope.add(className);
+    }
+    state.blockStack.push(classScope);
+  }
+}
+
+function enterRecursionCatch(node, state) {
+  const catchScope = new Set();
+  if (node.param) {
+    collectPatternIdentifiers(node.param, catchScope);
+  }
+  state.blockStack.push(catchScope);
+}
+
+function recordRecursionDeclarator(node, state) {
+  const boundFn = getBoundFunctionFromInit(node.init);
+  if (node.id.type === "Identifier" && boundFn) {
+    addBoundSelfName(state.boundSelfNames, boundFn, node.id.name);
+  } else {
+    collectPatternIdentifiers(node.id, state.blockStack[state.blockStack.length - 1]);
+  }
+}
+
+function exitRecursionDeclarator(node, state) {
+  if (node.id.type === "Identifier" && getBoundFunctionFromInit(node.init)) {
+    state.blockStack[state.blockStack.length - 1].add(node.id.name);
+  }
+}
+
+function recordRecursionAssignment(node, state) {
+  if (node.operator === "=" && node.left.type === "Identifier") {
+    const boundFn = getBoundFunctionFromInit(node.right);
+    if (boundFn) {
+      addBoundSelfName(state.boundSelfNames, boundFn, node.left.name);
+    }
+  }
+}
+
 const noDirectRecursionRule = {
   meta: {
     type: "problem",
@@ -839,6 +1006,8 @@ const noDirectRecursionRule = {
       thisInheritingFns: new WeakSet(),
     };
 
+    const pushEmptyBlock = () => state.blockStack.push(new Set());
+    const popBlock = () => state.blockStack.pop();
     const enterFunction = (node) => {
       state.fnStack.push(buildRecursionFrame(node, state));
       state.blockStack.push(new Set());
@@ -847,43 +1016,35 @@ const noDirectRecursionRule = {
       state.fnStack.pop();
       state.blockStack.pop();
     };
-    const enterClass = (node) => {
-      state.classStack.push(node.id && node.id.type === "Identifier" ? node.id.name : null);
-    };
-    const exitClass = () => {
-      state.classStack.pop();
-    };
 
     return {
-      BlockStatement: () => state.blockStack.push(new Set()),
-      "BlockStatement:exit": () => state.blockStack.pop(),
-      ClassDeclaration: enterClass,
-      "ClassDeclaration:exit": exitClass,
-      ClassExpression: enterClass,
-      "ClassExpression:exit": exitClass,
-      MethodDefinition: (node) => recordMethodDefinition(node, state),
-      VariableDeclarator(node) {
-        const boundFn = getBoundFunctionFromInit(node.init);
-        if (node.id.type === "Identifier" && boundFn) {
-          addBoundSelfName(state.boundSelfNames, boundFn, node.id.name);
-        } else {
-          collectPatternIdentifiers(node.id, state.blockStack[state.blockStack.length - 1]);
-        }
+      BlockStatement: (node) => enterRecursionBlock(node, state),
+      "BlockStatement:exit": popBlock,
+      ForStatement: pushEmptyBlock,
+      "ForStatement:exit": popBlock,
+      ForInStatement: pushEmptyBlock,
+      "ForInStatement:exit": popBlock,
+      ForOfStatement: pushEmptyBlock,
+      "ForOfStatement:exit": popBlock,
+      CatchClause: (node) => enterRecursionCatch(node, state),
+      "CatchClause:exit": popBlock,
+      ClassDeclaration: (node) => enterRecursionClass(node, state, false),
+      "ClassDeclaration:exit": () => state.classStack.pop(),
+      ClassExpression: (node) => enterRecursionClass(node, state, true),
+      "ClassExpression:exit"() {
+        state.classStack.pop();
+        state.blockStack.pop();
       },
-      "VariableDeclarator:exit"(node) {
-        if (node.id.type === "Identifier" && getBoundFunctionFromInit(node.init)) {
+      MethodDefinition: (node) => recordMethodDefinition(node, state),
+      VariableDeclarator: (node) => recordRecursionDeclarator(node, state),
+      "VariableDeclarator:exit": (node) => exitRecursionDeclarator(node, state),
+      AssignmentExpression: (node) => recordRecursionAssignment(node, state),
+      FunctionDeclaration(node) {
+        if (node.id && node.id.type === "Identifier") {
           state.blockStack[state.blockStack.length - 1].add(node.id.name);
         }
+        enterFunction(node);
       },
-      AssignmentExpression(node) {
-        if (node.operator === "=" && node.left.type === "Identifier") {
-          const boundFn = getBoundFunctionFromInit(node.right);
-          if (boundFn) {
-            addBoundSelfName(state.boundSelfNames, boundFn, node.left.name);
-          }
-        }
-      },
-      FunctionDeclaration: enterFunction,
       "FunctionDeclaration:exit": exitFunction,
       FunctionExpression: enterFunction,
       "FunctionExpression:exit": exitFunction,
@@ -1316,6 +1477,9 @@ function isUnitSafeInitializer(initNode) {
     return true;
   }
   if (expr.type === "Literal" && (typeof expr.value === "string" || typeof expr.value === "boolean")) {
+    return true;
+  }
+  if (isNamespaceMember(expr, "Duration")) {
     return true;
   }
   if (expr.type === "CallExpression") {
