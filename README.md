@@ -4,7 +4,7 @@ Agent skills and lints collection.
 
 ## Skills
 
-_None yet._
+- [`tigerstyle`](skills/tigerstyle/SKILL.md) - TigerStyle programming principles ordered by safety, performance, and developer experience.
 
 ## Lints
 
