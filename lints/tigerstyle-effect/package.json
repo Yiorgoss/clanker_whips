@@ -1,0 +1,17 @@
+{
+  "name": "oxlint-plugin-tigerstyle-effect",
+  "version": "0.1.0",
+  "description": "TigerStyle linting rules for Effect TypeScript codebases using oxlint",
+  "type": "module",
+  "exports": {
+    ".": "./plugin.mjs",
+    "./oxlintrc.json": "./oxlintrc.json"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "lint": "oxlint -c oxlintrc.json plugin.mjs test/tigerstyle-effect.test.mjs"
+  },
+  "devDependencies": {
+    "oxlint": "^1.95.0"
+  }
+}

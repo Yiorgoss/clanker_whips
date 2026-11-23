@@ -8,4 +8,4 @@ Agent skills and lints collection.
 
 ## Lints
 
-_None yet._
+- [tigerstyle-effect](lints/tigerstyle-effect/) - TigerStyle linting rules and `oxlint` preset for Effect TypeScript codebases.
