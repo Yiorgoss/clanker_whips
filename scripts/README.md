@@ -2,7 +2,7 @@
 
 ## `telegram-bridge.ts` (`telegram-bridge.mjs` shim)
 
-An Effect-TS (v4) script that runs natively under Node.js v22+ (no build step) and connects a private Telegram chat to a local `firstmate` inbox.
+An Effect-TS (v4) script that runs natively under Node.js v22.18+ (no build step) and connects a private Telegram chat to a local `firstmate` inbox.
 
 - **Inbound (Telegram -> Firstmate):** Long-polls Telegram `getUpdates` (`timeout=30`) and submits allowed text messages idempotently via `<FIRSTMATE_HOME>/bin/fm-inbox.sh note --request-id tg-<update_id> --json -- <text>` without a shell.
 - **Outbound (Firstmate -> Telegram):** Polls `<FIRSTMATE_HOME>/bin/fm-inbox.sh receipts --all-replies` on an Effect `Schedule` and sends each new reply once, splitting messages longer than 4000 characters at newline or space boundaries.
