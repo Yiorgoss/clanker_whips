@@ -8,7 +8,7 @@ Agent skills, scripts, and lints collection.
 
 ## Scripts
 
-- [`telegram-bridge.mjs`](scripts/telegram-bridge.mjs) - Two-way Telegram bridge for firstmate (`--send` one-shot alerts and long-polling bridge). See [`scripts/README.md`](scripts/README.md).
+- [`telegram-bridge.ts`](scripts/telegram-bridge.ts) (with [`telegram-bridge.mjs`](scripts/telegram-bridge.mjs) CLI shim) - Effect-TS two-way Telegram bridge for firstmate (`--send` one-shot alerts and long-polling bridge, running natively on Node v22.18+). See [`scripts/README.md`](scripts/README.md).
 
 ## Lints
 
