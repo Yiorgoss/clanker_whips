@@ -372,6 +372,115 @@ test("StateStore loadState validates schema, deduplicates reply IDs, and fails w
   assert.equal(stat.mode & 0o777, 0o600)
 })
 
+test("StateStore updates in-memory state before persisting so transient save failures do not duplicate outbound deliveries or inbound offsets", async (t) => {
+  const sentMessages: Array<{ readonly chatId: string; readonly text: string }> = []
+  let saveAttempts = 0
+  let savedStates: Array<{ readonly offset: number; readonly deliveredReplyIds: ReadonlyArray<string> }> = []
+  let replies: ReadonlyArray<FmInboxReply> = [{ id: "reply-1", body: "Only once" }]
+
+  const config = makeBridgeRuntimeConfig({
+    token: TEST_TOKEN,
+    chatId: ALLOWED_CHAT_ID,
+    firstmateHome: "/unused",
+    stateFilePath: "/unused/state.json",
+  })
+
+  const memoryLayer = Layer.mergeAll(
+    BridgeConfig.layer(config),
+    BridgeLogger.layerCustom({ token: config.token, stdout: () => {}, stderr: () => {} }),
+    StateStore.layerMemory({
+      onSave: (state) => {
+        saveAttempts += 1
+        if (saveAttempts === 1) {
+          return Effect.fail(
+            new StateStoreError({
+              operation: "save",
+              path: "/unused/state.json",
+              message: "transient ENOSPC",
+            }),
+          )
+        }
+        savedStates.push({ offset: state.offset, deliveredReplyIds: [...state.deliveredReplyIds] })
+        return Effect.void
+      },
+    }),
+    TelegramClient.layerTest({
+      call: () => Effect.succeed({}),
+      getUpdates: () => Effect.succeed([]),
+      sendMessage: () => Effect.succeed({ message_id: 1 }),
+      sendChunkedMessage: (chatId, text) =>
+        Effect.sync(() => {
+          sentMessages.push({ chatId, text })
+          return 1
+        }),
+    }),
+    FirstmateInbox.layerTest({
+      submitNote: () => Effect.succeed({ status: "ok" as const, noteId: "n1", outcome: "created" }),
+      announceNote: () => Effect.succeed({ ok: true, exitCode: 0, stderr: "" }),
+      fetchReceipts: Effect.sync(() => replies),
+    }),
+  )
+
+  const memResult = await Effect.runPromise(
+    Effect.gen(function*() {
+      const store = yield* StateStore
+      const firstExit = yield* Effect.exit(pollOutboundOnce())
+      const deliveredAfterFail = yield* store.hasDeliveredReply("reply-1")
+      const retryDelivered = yield* pollOutboundOnce()
+      replies = [
+        { id: "reply-1", body: "Only once" },
+        { id: "reply-2", body: "Second reply" },
+      ]
+      const recoveredDelivered = yield* pollOutboundOnce()
+      const finalState = yield* store.get
+      return { firstExit, deliveredAfterFail, retryDelivered, recoveredDelivered, finalState }
+    }).pipe(Effect.provide(memoryLayer)),
+  )
+
+  assert.ok(Exit.isFailure(memResult.firstExit))
+  assert.ok(Cause.squash(memResult.firstExit.cause) instanceof StateStoreError)
+  assert.equal(memResult.deliveredAfterFail, true)
+  assert.equal(memResult.retryDelivered, 0)
+  assert.equal(memResult.recoveredDelivered, 1)
+  assert.deepEqual(sentMessages, [
+    { chatId: ALLOWED_CHAT_ID, text: "Only once" },
+    { chatId: ALLOWED_CHAT_ID, text: "Second reply" },
+  ])
+  assert.deepEqual(memResult.finalState.deliveredReplyIds, ["reply-1", "reply-2"])
+  assert.deepEqual(savedStates.at(-1)?.deliveredReplyIds, ["reply-1", "reply-2"])
+
+  const tmpDir = await makeTempDir(t)
+  const stateFile = path.join(tmpDir, "state.json")
+  const fileLayer = StateStore.layerFile(stateFile)
+
+  await Effect.runPromise(
+    Effect.gen(function*() {
+      const store = yield* StateStore
+      yield* Effect.promise(() => fs.mkdir(stateFile, { recursive: true }))
+
+      const replyFailExit = yield* Effect.exit(store.markReplyDelivered("file-reply-1"))
+      assert.ok(Exit.isFailure(replyFailExit))
+      assert.ok(Cause.squash(replyFailExit.cause) instanceof StateStoreError)
+      assert.equal(yield* store.hasDeliveredReply("file-reply-1"), true)
+
+      const offsetFailExit = yield* Effect.exit(store.advanceOffset(42))
+      assert.ok(Exit.isFailure(offsetFailExit))
+      assert.ok(Cause.squash(offsetFailExit.cause) instanceof StateStoreError)
+      assert.equal((yield* store.get).offset, 42)
+
+      yield* Effect.promise(() => fs.rmdir(stateFile))
+      assert.equal(yield* store.markReplyDelivered("file-reply-2"), true)
+    }).pipe(Effect.provide(fileLayer)),
+  )
+
+  const persisted = await Effect.runPromise(loadState(stateFile))
+  assert.deepEqual(persisted, {
+    version: 1,
+    offset: 42,
+    deliveredReplyIds: ["file-reply-1", "file-reply-2"],
+  })
+})
+
 test("Effect Layer unit test: pollInboundOnce & pollOutboundOnce with in-memory service layers", async () => {
   const submittedNotes: Array<{ readonly requestId: string; readonly text: string }> = []
   const announcedNotes: Array<string> = []
