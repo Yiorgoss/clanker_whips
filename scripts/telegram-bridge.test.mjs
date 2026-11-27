@@ -883,4 +883,3 @@ process.exit(1);
 
   assert.ok(stderrLines.some((line) => line.includes('inbound poll failed')));
 });
-
