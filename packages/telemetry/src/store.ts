@@ -306,95 +306,106 @@ export const openTelemetryStore = Effect.fn("openTelemetryStore")(function*(
   const writeLock = yield* Semaphore.make(1)
   let closed = false
 
-  const record = Effect.fn("TelemetryStore.record")(
-    function*(rawEvent: TelemetryEvent): Effect.fn.Return<TelemetryEvent, TelemetryStoreError> {
-      if (closed) {
-        return yield* new TelemetryStoreError({
-          operation: "write",
-          path: dbPath,
-          message: "Telemetry store is closed",
-        })
-      }
-
-      const event = redactTelemetryEvent(rawEvent, extraSecrets)
-
-      const encodedLine = yield* encodeTelemetryEventJson(event).pipe(
-        Effect.mapError((err) =>
-          new TelemetryStoreError({
-            operation: "write",
-            path: jsonlPath,
-            message: `Failed to encode telemetry event: ${err.message}`,
-          })
-        ),
-      )
-
-      yield* Effect.tryPromise({
-        try: async () => {
-          await fs.mkdir(path.dirname(jsonlPath), { recursive: true, mode: 0o700 })
-          await fs.appendFile(jsonlPath, `${encodedLine}\n`, {
-            encoding: "utf8",
-            mode: 0o600,
-          })
-          await fs.chmod(jsonlPath, 0o600).catch(() => {})
-        },
-        catch: (err) =>
-          new TelemetryStoreError({
-            operation: "write",
-            path: jsonlPath,
-            message: `Failed to append JSONL telemetry event: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          }),
+  const record = Effect.fn("TelemetryStore.record")(function*(
+    rawEvent: TelemetryEvent,
+  ): Effect.fn.Return<TelemetryEvent, TelemetryStoreError> {
+    if (closed) {
+      return yield* new TelemetryStoreError({
+        operation: "write",
+        path: dbPath,
+        message: "Telemetry store is closed",
       })
+    }
 
-      yield* Effect.try({
-        try: () => {
-          const attrs = event.attributes
-          insertStmt.run(
-            event.traceId,
-            event.spanId,
-            event.parentSpanId,
-            event.timestamp,
-            event.timestampMs,
-            event.sessionId,
-            event.taskId,
-            event.source,
-            event.eventType,
-            event.name,
-            event.durationMs,
-            event.status,
-            event.domain,
-            asNullableString(attrs.command),
-            asNullableString(attrs.url),
-            asNullableString(attrs.filename),
-            asNullableString(attrs.destinationPath),
-            asNullableString(attrs.via),
-            asNullableString(attrs.contentType),
-            asNullableString(attrs.cwd),
-            event.exitCode,
-            asNullableInt(attrs.statusCode),
-            event.bytesTransferred,
-            JSON.stringify(attrs),
-          )
-        },
-        catch: (err) =>
-          new TelemetryStoreError({
+    const event = redactTelemetryEvent(rawEvent, extraSecrets)
+
+    const encodedLine = yield* encodeTelemetryEventJson(event).pipe(
+      Effect.mapError((err) =>
+        new TelemetryStoreError({
+          operation: "write",
+          path: jsonlPath,
+          message: `Failed to encode telemetry event: ${err.message}`,
+        })
+      ),
+    )
+
+    yield* writeLock.withPermit(
+      Effect.gen(function*() {
+        if (closed) {
+          return yield* new TelemetryStoreError({
             operation: "write",
             path: dbPath,
-            message: `Failed to insert SQLite telemetry event: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          }),
-      })
+            message: "Telemetry store is closed",
+          })
+        }
 
-      if (alertDispatcher !== undefined) {
-        yield* alertDispatcher.inspectAndAlert(event)
-      }
+        yield* Effect.tryPromise({
+          try: async () => {
+            await fs.mkdir(path.dirname(jsonlPath), { recursive: true, mode: 0o700 })
+            await fs.appendFile(jsonlPath, `${encodedLine}\n`, {
+              encoding: "utf8",
+              mode: 0o600,
+            })
+            await fs.chmod(jsonlPath, 0o600).catch(() => {})
+          },
+          catch: (err) =>
+            new TelemetryStoreError({
+              operation: "write",
+              path: jsonlPath,
+              message: `Failed to append JSONL telemetry event: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            }),
+        })
 
-      return event
-    },
-    writeLock.withPermit,
-  )
+        yield* Effect.try({
+          try: () => {
+            const attrs = event.attributes
+            insertStmt.run(
+              event.traceId,
+              event.spanId,
+              event.parentSpanId,
+              event.timestamp,
+              event.timestampMs,
+              event.sessionId,
+              event.taskId,
+              event.source,
+              event.eventType,
+              event.name,
+              event.durationMs,
+              event.status,
+              event.domain,
+              asNullableString(attrs.command),
+              asNullableString(attrs.url),
+              asNullableString(attrs.filename),
+              asNullableString(attrs.destinationPath),
+              asNullableString(attrs.via),
+              asNullableString(attrs.contentType),
+              asNullableString(attrs.cwd),
+              event.exitCode,
+              asNullableInt(attrs.statusCode),
+              event.bytesTransferred,
+              JSON.stringify(attrs),
+            )
+          },
+          catch: (err) =>
+            new TelemetryStoreError({
+              operation: "write",
+              path: dbPath,
+              message: `Failed to insert SQLite telemetry event: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            }),
+        })
+      }),
+    )
+
+    if (alertDispatcher !== undefined) {
+      yield* alertDispatcher.inspectAndAlert(event)
+    }
+
+    return event
+  })
 
   const queryCommands = Effect.fn("TelemetryStore.queryCommands")(function*(
     filter: QueryFilterOptions = {},

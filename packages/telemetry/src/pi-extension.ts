@@ -177,6 +177,9 @@ function extractExitCode(event: PiToolResultEventLike): number {
       return raw
     }
   }
+  if (event.isError === false) {
+    return 0
+  }
   const text = extractResultText(event.content)
   const match = /exited with code (-?\d+)/i.exec(text) ?? /exit code[:\s]+(-?\d+)/i.exec(text)
   if (match?.[1] !== undefined) {
@@ -440,36 +443,47 @@ export function createTelemetryExtension(
     })
 
     const pendingCalls = new Map<string, PendingToolCall>()
+    const pendingByToolName = new Map<string, Array<PendingToolCall>>()
     let activeStore: TelemetryStoreShape | undefined = options.store
     let ownsStore = options.store === undefined
     let storeInitFailed = false
+    let storeInitPromise: Promise<TelemetryStoreShape | undefined> | undefined
+    let shuttingDown = false
 
     const ensureStore = async (): Promise<TelemetryStoreShape | undefined> => {
       if (activeStore !== undefined) {
         return activeStore
       }
-      if (storeInitFailed) {
+      if (storeInitFailed || shuttingDown) {
         return undefined
+      }
+      if (storeInitPromise !== undefined) {
+        return storeInitPromise
       }
       const alertPolicy = options.storeOptions?.alertPolicy ?? readAlertPolicyFromEnv(env)
       const mergedOptions: TelemetryStoreOptions = {
         ...options.storeOptions,
         alertPolicy,
       }
-      const exit = await Effect.runPromiseExit(openTelemetryStore(mergedOptions))
-      if (Exit.isFailure(exit)) {
-        storeInitFailed = true
-        warn(`failed to open telemetry store: ${String(Cause.squash(exit.cause))}`)
-        return undefined
-      }
-      activeStore = exit.value
-      ownsStore = true
-      return activeStore
+      storeInitPromise = Effect.runPromiseExit(openTelemetryStore(mergedOptions))
+        .then((exit) => {
+          if (Exit.isFailure(exit)) {
+            storeInitFailed = true
+            warn(`failed to open telemetry store: ${String(Cause.squash(exit.cause))}`)
+            return undefined
+          }
+          activeStore = exit.value
+          ownsStore = true
+          return activeStore
+        })
+        .finally(() => {
+          storeInitPromise = undefined
+        })
+      return storeInitPromise
     }
 
     pi.on("tool_call", (event, ctx) => {
       try {
-        const key = event.toolCallId ?? `${event.toolName}:${nowFn()}`
         const parentPending = event.parentToolCallId
           ? pendingCalls.get(event.parentToolCallId)
           : undefined
@@ -477,7 +491,7 @@ export function createTelemetryExtension(
           ? createChildSpanContext(parentPending.spanContext)
           : createSpanContext({ env })
 
-        pendingCalls.set(key, {
+        const entry: PendingToolCall = {
           startedAtMs: nowFn(),
           toolName: event.toolName,
           input: event.input ? { ...event.input } : {},
@@ -485,7 +499,18 @@ export function createTelemetryExtension(
           sessionId: resolveSessionId(ctx, env),
           taskId: resolveTaskId(env),
           spanContext,
-        })
+        }
+
+        if (event.toolCallId !== undefined) {
+          pendingCalls.set(event.toolCallId, entry)
+        } else {
+          const queue = pendingByToolName.get(event.toolName)
+          if (queue !== undefined) {
+            queue.push(entry)
+          } else {
+            pendingByToolName.set(event.toolName, [entry])
+          }
+        }
       } catch (err) {
         warn(`tool_call telemetry error: ${err instanceof Error ? err.message : String(err)}`)
       }
@@ -495,9 +520,18 @@ export function createTelemetryExtension(
       try {
         const nowMs = nowFn()
         const key = event.toolCallId
-        const pending = key !== undefined ? pendingCalls.get(key) : undefined
+        let pending: PendingToolCall | undefined
         if (key !== undefined) {
+          pending = pendingCalls.get(key)
           pendingCalls.delete(key)
+        } else {
+          const queue = pendingByToolName.get(event.toolName)
+          if (queue !== undefined && queue.length > 0) {
+            pending = queue.shift()
+            if (queue.length === 0) {
+              pendingByToolName.delete(event.toolName)
+            }
+          }
         }
 
         const events = buildEventsForToolResult({
@@ -529,7 +563,12 @@ export function createTelemetryExtension(
 
     pi.on("session_shutdown", async () => {
       try {
+        shuttingDown = true
         pendingCalls.clear()
+        pendingByToolName.clear()
+        if (storeInitPromise !== undefined) {
+          await storeInitPromise
+        }
         if (ownsStore && activeStore !== undefined) {
           const toClose = activeStore
           activeStore = undefined

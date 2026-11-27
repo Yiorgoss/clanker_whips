@@ -201,6 +201,13 @@ test("secret redaction strips Bearer tokens, Telegram tokens, API keys, env secr
   assert.equal(safeHeaders.cookie, "[REDACTED]")
   assert.equal(safeHeaders["x-api-key"], "[REDACTED]")
   assert.equal(safeHeaders["content-type"], "application/json")
+
+  const patCmd = redactText("git clone https://my_plain_pat_secret@github.com/org/repo.git")
+  assert.equal(patCmd.includes("my_plain_pat_secret"), false)
+  assert.equal(patCmd, "git clone https://[REDACTED]@github.com/org/repo.git")
+
+  const queryEmail = redactText("curl https://example.com?email=user@example.com")
+  assert.equal(queryEmail, "curl https://example.com?email=user@example.com")
 })
 
 test("Schema validation accepts well-formed events and rejects invalid trace IDs", async () => {
@@ -262,6 +269,18 @@ test("command and HTTP classifiers detect URLs, curl/wget/git/pnpm downloads, an
     contentType: "text/html; charset=utf-8",
   })
   assert.equal(htmlPage.isDownload, false)
+
+  assert.equal(classifyBashCommand("wget --help").downloads.length, 0)
+  assert.equal(classifyBashCommand("git clone --help").downloads.length, 0)
+
+  const attachedAndPiped = classifyBashCommand(
+    "curl -o/tmp/a.tgz https://example.com/a.tgz && wget -Oout.zip https://example.com/pkg.zip && curl https://example.com/c.tgz >/tmp/c.tgz | echo ok | curl -o /tmp/b.tgz https://example.com/b.tgz",
+  )
+  assert.equal(attachedAndPiped.downloads.length, 4)
+  assert.equal(attachedAndPiped.downloads[0]?.destinationPath, "/tmp/a.tgz")
+  assert.equal(attachedAndPiped.downloads[1]?.destinationPath, "out.zip")
+  assert.equal(attachedAndPiped.downloads[2]?.destinationPath, "/tmp/c.tgz")
+  assert.equal(attachedAndPiped.downloads[3]?.destinationPath, "/tmp/b.tgz")
 })
 
 test("alert allowlist and large-download policy evaluation", () => {
@@ -664,17 +683,142 @@ test("Pi extension never throws or blocks when telemetry store fails", async () 
   assert.match(warnings[0]!, /simulated disk full/)
 })
 
+test("Pi extension handles non-error stdout exit-code text, missing toolCallId correlation, and concurrent store init", async (t) => {
+  const dataDir = await makeTempDir(t, "telemetry-pi-edge-")
+  let clockMs = Date.parse("2026-11-27T16:00:00.000Z")
+  const warnings: Array<string> = []
+  const mockPi = createMockPiApi()
+
+  const extension = createTelemetryExtension({
+    storeOptions: { dataDir },
+    now: () => clockMs,
+    warn: (msg) => warnings.push(msg),
+  })
+  extension(mockPi.api)
+
+  await mockPi.emitToolCall({ toolName: "bash", input: { command: "rg 'exited with code 1' src/" } })
+  clockMs += 55
+  await mockPi.emitToolCall({ toolName: "bash", toolCallId: "par-1", input: { command: "echo one" } })
+  await mockPi.emitToolCall({ toolName: "bash", toolCallId: "par-2", input: { command: "echo two" } })
+  clockMs += 20
+
+  await Promise.all([
+    mockPi.emitToolResult({
+      toolName: "bash",
+      content: [{ type: "text", text: "match: process exited with code 1" }],
+      isError: false,
+    }),
+    mockPi.emitToolResult({
+      toolName: "bash",
+      toolCallId: "par-1",
+      content: [{ type: "text", text: "one" }],
+      isError: false,
+    }),
+    mockPi.emitToolResult({
+      toolName: "bash",
+      toolCallId: "par-2",
+      content: [{ type: "text", text: "two" }],
+      isError: false,
+    }),
+  ])
+
+  await mockPi.emitShutdown()
+  assert.deepEqual(warnings, [])
+
+  const store = await Effect.runPromise(openTelemetryStore({ dataDir }))
+  t.after(async () => {
+    await Effect.runPromise(store.close)
+  })
+
+  const cmds = await Effect.runPromise(store.queryCommands({ limit: 10 }))
+  assert.equal(cmds.length, 3)
+  const rgCmd = cmds.find((c) => c.command.includes("rg "))
+  assert.ok(rgCmd)
+  assert.equal(rgCmd.exitCode, 0)
+  assert.equal(rgCmd.status, "ok")
+  assert.equal(rgCmd.durationMs, 75)
+})
+
+test("TelemetryStore releases writeLock before executing alert commands", async (t) => {
+  const dataDir = await makeTempDir(t, "telemetry-store-lock-")
+  let releaseAlert!: () => void
+  let alertStarted = false
+  let secondRecordFinishedBeforeAlertRelease = false
+
+  const store = await Effect.runPromise(
+    openTelemetryStore({
+      dataDir,
+      alertDispatcher: {
+        inspectAndAlert: (event) =>
+          event.domain === "slow.invalid"
+            ? Effect.promise(
+              () =>
+                new Promise((resolve) => {
+                  alertStarted = true
+                  releaseAlert = () => resolve(null)
+                }),
+            )
+            : Effect.succeed(null),
+      },
+    }),
+  )
+  t.after(async () => {
+    await Effect.runPromise(store.close)
+  })
+
+  const slowRecordPromise = Effect.runPromise(
+    store.record(
+      makeTelemetryEvent({
+        eventType: "web_visit",
+        source: "proxy",
+        name: "http.proxy.request",
+        domain: "slow.invalid",
+      }),
+    ),
+  )
+
+  await waitForCondition(async () => alertStarted, 1000)
+
+  await Effect.runPromise(
+    store.record(
+      makeTelemetryEvent({
+        eventType: "command",
+        source: "pi_extension",
+        name: "tool.bash",
+        attributes: { command: "echo fast" },
+      }),
+    ),
+  )
+  secondRecordFinishedBeforeAlertRelease = true
+  releaseAlert()
+  await slowRecordPromise
+
+  assert.equal(secondRecordFinishedBeforeAlertRelease, true)
+  const events = await Effect.runPromise(store.queryEvents({ limit: 10 }))
+  assert.equal(events.length, 2)
+})
+
 // ---------------------------------------------------------------------------
 // End-to-end local outbound HTTP / HTTPS CONNECT metadata proxy & alerts
 // ---------------------------------------------------------------------------
 
-test("proxy refuses non-loopback binding by default and parses CONNECT authorities", async (t) => {
+test("proxy refuses non-loopback binding and parses CONNECT authorities", async (t) => {
   const dataDir = await makeTempDir(t, "telemetry-proxy-guard-")
   const exit = await Effect.runPromiseExit(
     startTelemetryProxy({ host: "0.0.0.0", port: 0, storeOptions: { dataDir } }),
   )
   assert.ok(Exit.isFailure(exit))
   assert.ok(Cause.squash(exit.cause) instanceof TelemetryConfigError)
+
+  let stderr = ""
+  const cliCode = await runTelemetryCli(["proxy", "--allow-non-loopback"], {
+    stdout: () => {},
+    stderr: (chunk) => {
+      stderr += chunk
+    },
+  })
+  assert.equal(cliCode, 1)
+  assert.match(stderr, /Unknown option: --allow-non-loopback/)
 
   assert.deepEqual(parseConnectAuthority("example.com:443"), { host: "example.com", port: 443 })
   assert.deepEqual(parseConnectAuthority("[::1]:8443"), { host: "::1", port: 8443 })
@@ -873,12 +1017,21 @@ fs.appendFileSync(${JSON.stringify(alertLogFile)}, JSON.stringify({
   })
 
   const events = await Effect.runPromise(proxy.store.queryEvents({ limit: 20 }))
+  const summary = await Effect.runPromise(proxy.store.querySummary())
+  const domains = await Effect.runPromise(proxy.store.queryDomains())
   await proxy.stop()
   const visits = events.filter((e) => e.eventType === "web_visit")
   const downloads = events.filter((e) => e.eventType === "file_download")
 
   assert.equal(visits.length, 3, "expected 2 HTTP visits + 1 CONNECT tunnel visit")
   assert.equal(downloads.length, 1, "expected 1 HTTP attachment download")
+
+  const expectedHttpBytes = Buffer.byteLength(jsonResponse.body, "utf8") + downloadPayload.length
+  const expectedTunnelBytes =
+    Buffer.byteLength("OPAQUE_TLS_BYTES_HELLO") + Buffer.byteLength("ECHO:OPAQUE_TLS_BYTES_HELLO")
+  assert.equal(summary.totalBytesTransferred, expectedHttpBytes + expectedTunnelBytes)
+  const loopbackDomain = domains.find((d) => d.domain === "127.0.0.1")
+  assert.equal(loopbackDomain?.totalBytes, expectedHttpBytes)
 
   const statusVisit = visits.find((v) => String(v.attributes.url).includes("/api/status"))
   assert.ok(statusVisit)
@@ -905,9 +1058,10 @@ fs.appendFileSync(${JSON.stringify(alertLogFile)}, JSON.stringify({
     .split("\n")
     .map((line) => JSON.parse(line) as { kind: string; domain: string; body: string })
 
-  assert.ok(
-    alertEntries.some((a) => a.kind === "large_download" && a.domain === "127.0.0.1"),
-    "expected large_download alert",
+  assert.equal(
+    alertEntries.filter((a) => a.kind === "large_download" && a.domain === "127.0.0.1").length,
+    1,
+    "expected exactly one large_download alert",
   )
   assert.ok(
     alertEntries.some((a) => a.kind === "unexpected_domain" && a.domain === "localhost"),

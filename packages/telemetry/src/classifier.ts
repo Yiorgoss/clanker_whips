@@ -192,7 +192,7 @@ export function detectHttpDownload(input: {
  */
 function splitShellSegments(command: string): ReadonlyArray<string> {
   return command
-    .split(/(?:&&|\|\||;|\n)/)
+    .split(/(?:&&|\|\||\||;|\n)/)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0)
 }
@@ -264,10 +264,38 @@ function stripLeadingEnvAssignments(tokens: ReadonlyArray<string>): ReadonlyArra
   return tokens.slice(idx)
 }
 
+function extractRedirectionTarget(
+  tokens: ReadonlyArray<string>,
+  index: number,
+): { readonly path: string; readonly advance: number } | null {
+  const tok = tokens[index]
+  if (tok === undefined) {
+    return null
+  }
+  if (tok === ">" || tok === ">>" || tok === "1>" || tok === "1>>") {
+    const next = tokens[index + 1]
+    if (next && next !== "/dev/null" && !next.startsWith("&")) {
+      return { path: next, advance: 1 }
+    }
+    return null
+  }
+  const attached = /^(?:1)?>>?(.+)$/.exec(tok)
+  const target = attached?.[1]
+  if (target && target !== "/dev/null" && !target.startsWith("&")) {
+    return { path: target, advance: 0 }
+  }
+  return null
+}
+
 function detectCurlDownload(
   tokens: ReadonlyArray<string>,
   segmentUrls: ReadonlyArray<string>,
 ): DetectedCommandDownload | null {
+  const url = segmentUrls[0] ?? null
+  if (url === null) {
+    return null
+  }
+
   let outputPath: string | null = null
   let remoteName = false
 
@@ -291,6 +319,13 @@ function detectCurlDownload(
       }
       continue
     }
+    if (tok.startsWith("-o") && tok.length > 2) {
+      const val = tok.slice(2)
+      if (val !== "-") {
+        outputPath = val
+      }
+      continue
+    }
     if (tok === "-O" || tok === "--remote-name" || tok === "--remote-name-all") {
       remoteName = true
       continue
@@ -299,9 +334,10 @@ function detectCurlDownload(
       remoteName = true
       continue
     }
-    if ((tok === ">" || tok === ">>") && tokens[i + 1] && tokens[i + 1] !== "/dev/null") {
-      outputPath = tokens[i + 1] ?? null
-      i += 1
+    const redir = extractRedirectionTarget(tokens, i)
+    if (redir !== null) {
+      outputPath = redir.path
+      i += redir.advance
     }
   }
 
@@ -309,15 +345,14 @@ function detectCurlDownload(
     return null
   }
 
-  const url = segmentUrls[0] ?? null
   const filename = outputPath !== null
     ? path.basename(outputPath)
-    : (url ? extractFilenameFromUrl(url) : null)
+    : extractFilenameFromUrl(url)
 
   return {
     via: "curl",
     url,
-    domain: url ? extractDomainFromUrl(url) : null,
+    domain: extractDomainFromUrl(url),
     destinationPath: outputPath,
     filename,
   }
@@ -327,6 +362,11 @@ function detectWgetDownload(
   tokens: ReadonlyArray<string>,
   segmentUrls: ReadonlyArray<string>,
 ): DetectedCommandDownload | null {
+  const url = segmentUrls[0] ?? null
+  if (url === null) {
+    return null
+  }
+
   let outputPath: string | null = null
   let stdoutOnly = false
 
@@ -354,8 +394,20 @@ function detectWgetDownload(
       }
       continue
     }
-    if (/^-[A-Za-z]*O-$/.test(tok)) {
-      stdoutOnly = true
+    const attachedO = /^-[A-Za-z]*O(.+)$/.exec(tok)
+    if (attachedO?.[1] !== undefined) {
+      const val = attachedO[1]
+      if (val === "-") {
+        stdoutOnly = true
+      } else {
+        outputPath = val
+      }
+      continue
+    }
+    const redir = extractRedirectionTarget(tokens, i)
+    if (redir !== null) {
+      outputPath = redir.path
+      i += redir.advance
     }
   }
 
@@ -363,15 +415,14 @@ function detectWgetDownload(
     return null
   }
 
-  const url = segmentUrls[0] ?? null
   const filename = outputPath !== null
     ? path.basename(outputPath)
-    : (url ? extractFilenameFromUrl(url) : null)
+    : extractFilenameFromUrl(url)
 
   return {
     via: "wget",
     url,
-    domain: url ? extractDomainFromUrl(url) : null,
+    domain: extractDomainFromUrl(url),
     destinationPath: outputPath,
     filename,
   }
@@ -401,10 +452,13 @@ function detectGitClone(
   }
 
   const repoRef = positional[0] ?? segmentUrls[0] ?? null
+  if (repoRef === null) {
+    return null
+  }
   const destDir = positional[1] ?? null
-  const url = segmentUrls[0] ?? (repoRef && /^https?:\/\//i.test(repoRef) ? repoRef : null)
+  const url = segmentUrls[0] ?? (/^https?:\/\//i.test(repoRef) ? repoRef : null)
   let domain = url ? extractDomainFromUrl(url) : null
-  if (domain === null && repoRef !== null) {
+  if (domain === null) {
     const sshMatch = /^[^@\s]+@([^:\s]+):/.exec(repoRef)
     if (sshMatch?.[1]) {
       domain = sshMatch[1].toLowerCase()
@@ -412,7 +466,7 @@ function detectGitClone(
   }
   const filename = destDir
     ? path.basename(destDir)
-    : (repoRef ? path.basename(repoRef.replace(/\.git$/, "")) : null)
+    : path.basename(repoRef.replace(/\.git$/, ""))
 
   return {
     via: "git_clone",

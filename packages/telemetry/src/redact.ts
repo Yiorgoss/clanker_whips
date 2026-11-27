@@ -57,8 +57,8 @@ const INLINE_AUTH_HEADER_RE =
 const CLI_SECRET_FLAG_RE =
   /(--?(?:token|api-key|apikey|secret|password|passwd|auth-token|access-token))(?:\s+|=)(?:"[^"]*"|'[^']*'|[^\s"'`;|&]+)/gi
 
-// Basic auth credentials inside URLs: https://user:pass@host
-const URL_USERINFO_RE = /(https?:\/\/)([^\s/@"'`]+):([^\s/@"'`]+)@/gi
+// Credentials inside URLs: https://user:pass@host or https://token@host
+const URL_USERINFO_RE = /(https?:\/\/)([^\s/?#@"'`]+)@/gi
 
 // Sensitive query parameters inside freeform text URLs
 const QUERY_SECRET_RE =

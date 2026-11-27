@@ -11,7 +11,7 @@ This package runs natively on Node.js v22.18+ with Effect-TS v4 and Node's built
    - `web_visit` events for web-search or browser tools and HTTP(S) URLs referenced in commands.
    - `file_download` events for download commands (`curl -o/-O`, `wget`, `git clone`, `pnpm add/install`, `npm install`, `pip install`, `cargo install`, `gh release download`) and file writes (`write`).
 2. **Local outbound metadata proxy (`src/proxy.ts`)** - forwards HTTP and HTTPS traffic while logging metadata only:
-   - Binds to `127.0.0.1` only by default.
+   - Binds to loopback hosts only (default: `127.0.0.1`).
    - Handles `CONNECT host:port` tunnels for HTTPS without TLS interception (logs host, port, duration, bytes in, bytes out).
    - Forwards plain HTTP requests and logs method, redacted URL, domain, status code, `content-type`, `content-disposition`, `content-length`, and bytes transferred.
    - Flags HTTP file downloads automatically from `Content-Disposition`, binary/archive `Content-Type`, or archive/binary URL extensions.

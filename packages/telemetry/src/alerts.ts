@@ -105,7 +105,8 @@ export function evaluateAlertPolicy(
     policy.maxDownloadBytes > 0 &&
     event.bytesTransferred !== null &&
     event.bytesTransferred >= policy.maxDownloadBytes &&
-    (event.eventType === "file_download" || event.eventType === "web_visit")
+    (event.eventType === "file_download" ||
+      (event.eventType === "web_visit" && event.attributes.isDownload !== true))
   ) {
     const filename = typeof event.attributes.filename === "string"
       ? event.attributes.filename

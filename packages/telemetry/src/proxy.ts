@@ -35,7 +35,6 @@ const HOP_BY_HOP_HEADERS = new Set([
 export interface TelemetryProxyOptions {
   readonly host?: string | undefined
   readonly port?: number | undefined
-  readonly allowNonLoopback?: boolean | undefined
   readonly store?: TelemetryStoreShape | undefined
   readonly storeOptions?: TelemetryStoreOptions | undefined
   readonly alertPolicy?: AlertPolicy | undefined
@@ -170,9 +169,9 @@ export const startTelemetryProxy = Effect.fn("startTelemetryProxy")(function*(
   const port = options.port ?? DEFAULT_PROXY_PORT
   const env = options.env ?? process.env
 
-  if (!options.allowNonLoopback && !LOOPBACK_HOSTS.has(host.toLowerCase())) {
+  if (!LOOPBACK_HOSTS.has(host.toLowerCase())) {
     return yield* new TelemetryConfigError({
-      message: `Refusing to bind proxy to non-loopback host "${host}". Use 127.0.0.1 or pass allowNonLoopback explicitly.`,
+      message: `Refusing to bind proxy to non-loopback host "${host}". Only loopback hosts (127.0.0.1, ::1, localhost) are supported.`,
     })
   }
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -260,6 +259,14 @@ export const startTelemetryProxy = Effect.fn("startTelemetryProxy")(function*(
       const status = isError ? "error" : "ok"
       const redactedUrl = redactUrl(targetUrl.toString())
 
+      const downloadInfo = detectHttpDownload({
+        method,
+        url: targetUrl.toString(),
+        contentType,
+        contentDisposition,
+        contentLength: contentLength ?? undefined,
+      })
+
       const visitEvent = makeTelemetryEvent({
         eventType: "web_visit",
         source: "proxy",
@@ -273,10 +280,11 @@ export const startTelemetryProxy = Effect.fn("startTelemetryProxy")(function*(
         spanId: spanCtx.spanId,
         parentSpanId: spanCtx.parentSpanId,
         domain,
-        bytesTransferred: bytesIn + bytesOut,
+        bytesTransferred: downloadInfo.isDownload ? bytesOut : bytesIn + bytesOut,
         attributes: {
           protocol: "http",
           tunnel: false,
+          isDownload: downloadInfo.isDownload,
           method,
           url: redactedUrl,
           domain,
@@ -292,14 +300,6 @@ export const startTelemetryProxy = Effect.fn("startTelemetryProxy")(function*(
         },
       })
       enqueueRecord(visitEvent)
-
-      const downloadInfo = detectHttpDownload({
-        method,
-        url: targetUrl.toString(),
-        contentType,
-        contentDisposition,
-        contentLength: contentLength ?? undefined,
-      })
 
       if (downloadInfo.isDownload) {
         const childSpan = createChildSpanContext(spanCtx)
@@ -471,16 +471,14 @@ export const startTelemetryProxy = Effect.fn("startTelemetryProxy")(function*(
       if (head.length > 0) {
         upstreamSocket.write(head)
       }
+      upstreamSocket.on("data", (chunk: Buffer) => {
+        bytesIn += chunk.length
+      })
+      clientSocket.on("data", (chunk: Buffer) => {
+        bytesOut += chunk.length
+      })
       upstreamSocket.pipe(clientSocket)
       clientSocket.pipe(upstreamSocket)
-    })
-
-    upstreamSocket.on("data", (chunk: Buffer) => {
-      bytesIn += chunk.length
-    })
-
-    clientSocket.on("data", (chunk: Buffer) => {
-      bytesOut += chunk.length
     })
 
     upstreamSocket.on("error", (err) => {

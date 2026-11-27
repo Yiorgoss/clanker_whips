@@ -44,7 +44,6 @@ Proxy options:
   --allow-domain <domain>      Allowlisted domain (repeatable or comma-separated; supports *.example.com)
   --max-download-bytes <n>     Alert threshold for large transfers in bytes
   --alert-cmd <cmd>            Command to run on anomaly alert (receives alert text on stdin)
-  --allow-non-loopback         Explicitly allow binding proxy outside loopback (unsafe)
 
 General options:
   -h, --help               Show this help message
@@ -104,7 +103,6 @@ export interface ParsedTelemetryCliArgs {
   readonly json: boolean
   readonly host: string | undefined
   readonly port: number | undefined
-  readonly allowNonLoopback: boolean
   readonly allowedDomains: ReadonlyArray<string>
   readonly maxDownloadBytes: number | undefined
   readonly alertCmd: string | undefined
@@ -154,7 +152,6 @@ export const parseTelemetryCliArgs = Effect.fn("parseTelemetryCliArgs")(function
   let json = false
   let host: string | undefined
   let port: number | undefined
-  let allowNonLoopback = false
   const allowedDomains: Array<string> = []
   let maxDownloadBytes: number | undefined
   let alertCmd: string | undefined
@@ -170,10 +167,6 @@ export const parseTelemetryCliArgs = Effect.fn("parseTelemetryCliArgs")(function
     }
     if (arg === "--json") {
       json = true
-      continue
-    }
-    if (arg === "--allow-non-loopback") {
-      allowNonLoopback = true
       continue
     }
 
@@ -272,7 +265,6 @@ export const parseTelemetryCliArgs = Effect.fn("parseTelemetryCliArgs")(function
     json,
     host,
     port,
-    allowNonLoopback,
     allowedDomains,
     maxDownloadBytes,
     alertCmd,
@@ -443,7 +435,6 @@ export async function runTelemetryCli(
       startTelemetryProxy({
         host: cli.host ?? DEFAULT_PROXY_HOST,
         port: cli.port ?? DEFAULT_PROXY_PORT,
-        allowNonLoopback: cli.allowNonLoopback,
         storeOptions: { dataDir: cli.dataDir },
         alertPolicy,
         sessionId: cli.sessionId,
