@@ -1,7 +1,22 @@
+# Secrets and local environment files
 .env
 .env.*
 !.env.example
+
+# Local runtime state
 *.state.json
+*.state.json.*
 .telegram-bridge-state.json
+.telegram-bridge-state.json.*
+
+# Dependencies
 node_modules/
+
+# OS and editor artifacts
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
