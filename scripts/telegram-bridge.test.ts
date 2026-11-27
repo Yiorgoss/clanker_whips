@@ -37,12 +37,11 @@ import {
   sendOneShot,
   type FmInboxReply,
   type TelegramUpdate,
-} from "../src/index.ts"
+} from "./telegram-bridge.ts"
 
 const execFileAsync = promisify(execFile)
-const TEST_DIR = path.dirname(fileURLToPath(import.meta.url))
-const REPO_ROOT = path.resolve(TEST_DIR, "..", "..", "..")
-const SCRIPT_DIR = path.join(REPO_ROOT, "scripts")
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = path.resolve(SCRIPT_DIR, "..")
 const BRIDGE_TS_SCRIPT = path.join(SCRIPT_DIR, "telegram-bridge.ts")
 const BRIDGE_MJS_SCRIPT = path.join(SCRIPT_DIR, "telegram-bridge.mjs")
 
