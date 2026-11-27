@@ -3,14 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Agent skills, scripts, and lints collection.",
+  "description": "Agent skills, scripts, packages, and lints monorepo.",
   "engines": {
     "node": ">=22.18.0"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test": "node --test",
-    "telegram-bridge": "node scripts/telegram-bridge.ts"
+    "typecheck": "tsc --noEmit && pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "telegram-bridge": "node scripts/telegram-bridge.ts",
+    "telemetry": "node packages/telemetry/src/cli.ts"
   },
   "dependencies": {
     "effect": "4.0.4"
