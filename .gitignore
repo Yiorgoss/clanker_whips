@@ -9,13 +9,6 @@
 .telegram-bridge-state.json
 .telegram-bridge-state.json.*
 
-# Telemetry data files
-*.db
-*.db-wal
-*.db-shm
-*.jsonl
-.telemetry/
-
 # Dependencies
 node_modules/
 
