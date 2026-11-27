@@ -19,6 +19,18 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
+  packages/telegram-bridge:
+    dependencies:
+      effect:
+        specifier: 4.0.4
+        version: 4.0.4
+
+  packages/telemetry:
+    dependencies:
+      effect:
+        specifier: 4.0.4
+        version: 4.0.4
+
 packages:
 
   '@types/node@26.6.11':

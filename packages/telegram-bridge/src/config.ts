@@ -25,7 +25,7 @@ export const DEFAULT_INBOX_TIMEOUT_MS = 15000
 export const DEFAULT_SEND_TIMEOUT_MS = 30000
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
-export const REPO_ROOT = path.resolve(MODULE_DIR, "..", "..")
+export const REPO_ROOT = path.resolve(MODULE_DIR, "..", "..", "..")
 export const DEFAULT_ENV_FILE = path.join(REPO_ROOT, ".env")
 export const DEFAULT_STATE_FILE = path.join(REPO_ROOT, ".telegram-bridge-state.json")
 

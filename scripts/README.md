@@ -11,7 +11,7 @@ An Effect-TS (v4) script that runs natively under Node.js v22.18+ (no build step
 
 ### Architecture
 
-The implementation lives under `scripts/telegram-bridge/` and uses Effect v4 primitives:
+The implementation lives under `packages/telegram-bridge/src/` (workspace package `@clanker-whips/telegram-bridge`), while `scripts/telegram-bridge.ts` and `scripts/telegram-bridge.mjs` remain working compatibility shims. It uses Effect v4 primitives:
 
 - `Schema` decoders for config, Telegram Bot API payloads, `fm-inbox.sh` JSON responses, and persisted state (`.telegram-bridge-state.json`).
 - `Schema.TaggedError` typed errors (`ConfigError`, `TelegramApiError`, `InboxCommandError`, `StateStoreError`).
@@ -127,9 +127,9 @@ systemctl --user status clanker-telegram-bridge.service
 
 ### Verification and tests
 
-Run typechecking and the test suite with Node's built-in test runner:
+Run typechecking and the test suite across the workspace:
 
 ```bash
-pnpm exec tsc --noEmit
-node --test
+pnpm run typecheck
+pnpm test
 ```
