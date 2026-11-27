@@ -32,8 +32,8 @@ export const DEFAULT_ALERT_COOLDOWN_MS = 60_000
 
 /**
  * Check whether a hostname matches an allowlist entry.
- * Supports exact domains ("github.com"), suffix wildcards (".github.com" or "*.github.com"),
- * and loopback hosts ("localhost", "127.0.0.1", "::1").
+ * Supports exact hosts/domains ("github.com"), suffix wildcards (".github.com" or "*.github.com"),
+ * and the catch-all wildcard ("*").
  */
 export function isDomainAllowed(
   domain: string,
