@@ -519,7 +519,7 @@ process.exit(1);
   assert.equal(sentMessages.length, 3);
 });
 
-test('chunkMessage splits at newlines, spaces, and hard boundaries without dropping content', () => {
+test('chunkMessage splits at newlines, spaces, and hard boundaries without dropping content or emitting blank chunks', () => {
   const nlChunks = chunkMessage('first line\nsecond line\nthird line', 20);
   assert.deepEqual(nlChunks, ['first line', 'second line', 'third line']);
 
@@ -528,6 +528,16 @@ test('chunkMessage splits at newlines, spaces, and hard boundaries without dropp
 
   const hardChunks = chunkMessage('x'.repeat(25), 10);
   assert.deepEqual(hardChunks, ['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(5)]);
+
+  assert.deepEqual(chunkMessage('   \n\t  ', 10), []);
+  assert.deepEqual(chunkMessage(' '.repeat(25), 10), []);
+
+  const paddedChunks = chunkMessage(`${' '.repeat(25)}hello`, 10);
+  assert.deepEqual(paddedChunks, ['     hello']);
+  assert.ok(paddedChunks.every((chunk) => chunk.trim().length > 0 && chunk.length <= 10));
+
+  const newlinePaddedChunks = chunkMessage(`${'\n'.repeat(15)}tail`, 10);
+  assert.deepEqual(newlinePaddedChunks, ['\n\n\n\n\ntail']);
 });
 
 test('--send one-shot CLI mode sends direct text and stdin (-) without needing firstmate', async (t) => {
@@ -747,5 +757,130 @@ process.exit(1);
     child.on('close', (code) => resolve(code));
   });
   assert.equal(exitCode, 0, 'bridge CLI must exit 0 on SIGTERM');
+});
+
+test('TelegramClient.call aborts stalled response bodies on timeout and external abort', async (t) => {
+  let headersSentResolve;
+  let headersSentPromise = new Promise((resolve) => {
+    headersSentResolve = resolve;
+  });
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.flushHeaders();
+    headersSentResolve();
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  t.after(async () => {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const client = new TelegramClient({ token: TEST_TOKEN, apiBase: baseUrl });
+
+  await assert.rejects(
+    () => client.call('getUpdates', {}, { timeoutMs: 80 }),
+    (err) => {
+      assert.equal(err.name, 'TelegramApiError');
+      assert.equal(err.message.includes(TEST_TOKEN), false);
+      return true;
+    },
+  );
+
+  headersSentPromise = new Promise((resolve) => {
+    headersSentResolve = resolve;
+  });
+  const ac = new AbortController();
+  const abortCall = client.call('getUpdates', {}, { signal: ac.signal, timeoutMs: 5000 });
+  await headersSentPromise;
+  ac.abort();
+
+  await assert.rejects(
+    () => abortCall,
+    (err) => {
+      assert.equal(err.name, 'AbortError');
+      return true;
+    },
+  );
+});
+
+test('bridge shuts down cleanly even when the last state save failed', async (t) => {
+  const tmpDir = await makeTempDir(t);
+  const stateFile = path.join(tmpDir, '.telegram-bridge-state.json');
+
+  const { homeDir } = await createStubFirstmateHome(t, {
+    scriptBody: `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === 'note') {
+  process.stdout.write(JSON.stringify({ schema: 'fm-inbox-note.v1', outcome: 'created', id: 'note-1', saved: true, announced: true }) + '\\n');
+  process.exit(0);
+}
+if (args[0] === 'receipts') {
+  process.stdout.write(JSON.stringify({ schema: 'fm-inbox-receipts.v1', replies: [], reply_cursor: '', omitted: [] }) + '\\n');
+  process.exit(0);
+}
+process.exit(1);
+`,
+  });
+
+  let getUpdatesCalls = 0;
+  let resolveSaveFailed;
+  const saveFailedPromise = new Promise((resolve) => {
+    resolveSaveFailed = resolve;
+  });
+
+  const { baseUrl } = await startMockTelegramServer(t, async (req) => {
+    if (req.url === `/bot${TEST_TOKEN}/getUpdates`) {
+      getUpdatesCalls += 1;
+      if (getUpdatesCalls === 1) {
+        await fs.mkdir(stateFile, { recursive: true });
+        return {
+          json: {
+            ok: true,
+            result: [
+              { update_id: 600, message: { chat: { id: Number(ALLOWED_CHAT_ID), type: 'private' }, text: 'hello' } },
+            ],
+          },
+        };
+      }
+      return { json: { ok: true, result: [] } };
+    }
+    return { status: 404, json: { ok: false, description: 'not found' } };
+  });
+
+  const stderrLines = [];
+  const bridge = new TelegramBridge(
+    {
+      token: TEST_TOKEN,
+      chatId: ALLOWED_CHAT_ID,
+      firstmateHome: homeDir,
+      stateFilePath: stateFile,
+      apiBase: baseUrl,
+      pollTimeoutSeconds: 0,
+      replyPollMs: 50,
+    },
+    {
+      backoffInitialMs: 5000,
+      backoffMaxMs: 5000,
+      logStdout: () => {},
+      logStderr: (line) => {
+        stderrLines.push(line);
+        if (line.includes('inbound poll failed')) {
+          resolveSaveFailed();
+        }
+      },
+    },
+  );
+
+  const runPromise = bridge.run();
+  await saveFailedPromise;
+  bridge.stop();
+  await runPromise;
+
+  assert.ok(stderrLines.some((line) => line.includes('inbound poll failed')));
 });
 

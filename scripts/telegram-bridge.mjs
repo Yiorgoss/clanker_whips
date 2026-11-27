@@ -296,7 +296,7 @@ export function chunkMessage(text, maxLength = DEFAULT_MAX_CHUNK_LENGTH) {
   if (!Number.isInteger(maxLength) || maxLength <= 0) {
     throw new Error('maxLength must be a positive integer');
   }
-  if (text.length === 0) {
+  if (text.trim().length === 0) {
     return [];
   }
   if (text.length <= maxLength) {
@@ -331,7 +331,10 @@ export function chunkMessage(text, maxLength = DEFAULT_MAX_CHUNK_LENGTH) {
       consumeSeparator = false;
     }
 
-    chunks.push(remaining.slice(0, splitIndex));
+    const chunk = remaining.slice(0, splitIndex);
+    if (chunk.trim().length > 0) {
+      chunks.push(chunk);
+    }
     remaining = remaining.slice(consumeSeparator ? splitIndex + 1 : splitIndex);
   }
 
@@ -452,6 +455,7 @@ export class TelegramClient {
     const combinedSignal = createTimeoutSignal(timeoutMs, signal);
 
     let response;
+    let rawBody = '';
     try {
       response = await this.fetchImpl(url, {
         method: 'POST',
@@ -459,8 +463,8 @@ export class TelegramClient {
         body: JSON.stringify(payload),
         signal: combinedSignal.signal,
       });
+      rawBody = await response.text();
     } catch (err) {
-      combinedSignal.cleanup();
       if (signal && signal.aborted) {
         const abortErr = new Error('Request aborted');
         abortErr.name = 'AbortError';
@@ -470,10 +474,9 @@ export class TelegramClient {
       throw new TelegramApiError(
         redactSecrets(`Telegram ${method} network error: ${detail}`, this.token),
       );
+    } finally {
+      combinedSignal.cleanup();
     }
-    combinedSignal.cleanup();
-
-    const rawBody = await response.text().catch(() => '');
     let data = null;
     try {
       data = rawBody ? JSON.parse(rawBody) : null;
@@ -724,10 +727,10 @@ export class TelegramBridge {
       offset: this.state.offset,
       deliveredReplyIds: [...this.state.deliveredReplyIds],
     };
-    const nextSave = this.stateSaveChain
-      .catch(() => {})
-      .then(() => saveStateAtomic(this.config.stateFilePath, snapshot));
-    this.stateSaveChain = nextSave;
+    const nextSave = this.stateSaveChain.then(() =>
+      saveStateAtomic(this.config.stateFilePath, snapshot),
+    );
+    this.stateSaveChain = nextSave.catch(() => {});
     return nextSave;
   }
 
