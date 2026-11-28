@@ -1,0 +1,41 @@
+{
+  "plugins": ["typescript"],
+  "jsPlugins": ["./plugin.mjs"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "tigerstyle-effect/no-unbounded-loop": "error",
+    "tigerstyle-effect/no-direct-recursion": "error",
+    "tigerstyle-effect/no-swallowed-error": "error",
+    "tigerstyle-effect/no-nested-effect-in-sync": "error",
+    "tigerstyle-effect/no-untracked-throw": "error",
+    "tigerstyle-effect/require-unit-suffix": "error",
+
+    "max-lines-per-function": [
+      "error",
+      {
+        "max": 70,
+        "skipBlankLines": true,
+        "skipComments": true
+      }
+    ],
+    "max-depth": ["error", 4],
+    "no-constant-condition": ["error", { "checkLoops": "all" }],
+    "no-empty": "error",
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error",
+    "no-with": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "eqeqeq": ["error", "always", { "null": "ignore" }],
+    "curly": ["error", "all"],
+    "no-unmodified-loop-condition": "error",
+    "no-unreachable-loop": "error",
+    "no-throw-literal": "error",
+    "no-debugger": "error",
+
+    "require-yield": "off"
+  }
+}
